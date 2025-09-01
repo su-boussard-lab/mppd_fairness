@@ -1,0 +1,681 @@
+from sklearn.metrics.pairwise import euclidean_distances
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import NearestNeighbors
+from scipy.spatial.distance import pdist, squareform
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import pickle
+from datetime import datetime
+
+COMORBIDITY_FEATURES = ['Myocardial_Infarction', 'Congestive_Heart_Failure',
+       'Peripheral_Vascular_Disease', 'Cerebrovascular_Disease', 'Dementia',
+       'Chronic_Pulmonary_Disease', 'Rheumatic_Disease',
+       'Peptic_Ulcer_Disease', 'Mild_Liver_Disease',
+       'Diabetes_without_Chronic_Complication',
+       'Diabetes_with_Chronic_Complication', 'Hemiplegia_or_Paraplegia',
+       'Renal_Disease', 'Any_Malignancy', 'Moderate_or_Severe_Liver_Disease',
+       'Metastatic_Solid_Tumor', 'AIDS_HIV']
+
+IF_FEATURES = ['age', 'bmi', 'opioid_naive', 'Charlson_score', 'pre_pain_score',
+       'mental_substance_abuse', 'mental_mood_disorders',
+       'mental_anxiety_disorders', 'mental_behavioral_syndromes',
+       'anesthesia_type_MAC', 'anesthesia_type_general',
+       'anesthesia_type_hybrid', 'anesthesia_type_regional',
+       'surg_family_Appendectomy', 'surg_family_CABG',
+       'surg_family_ColorecResect', 'surg_family_ExciLysisPeriAdhesions',
+       'surg_family_HysterecAbVag', 'surg_family_InguinHerniaRepair',
+       'surg_family_KneeReplacement', 'surg_family_OophorectomyUniBi',
+       'surg_family_OtherHand', 'surg_family_PartialExcBone',
+       'surg_family_SpinalFusion', 'surg_family_TreatFracDisHipFemur',
+       'surg_family_TreatFracDisLowExtremity', 'surg_family_cholecystectomy',
+       'surg_family_laminectomy', 'surg_family_mastectomy',
+       'surg_family_prostatectomy', 'surg_family_thoracotomy',
+       'Myocardial_Infarction', 'Congestive_Heart_Failure',
+       'Peripheral_Vascular_Disease', 'Cerebrovascular_Disease', 'Dementia',
+       'Chronic_Pulmonary_Disease', 'Rheumatic_Disease',
+       'Peptic_Ulcer_Disease', 'Mild_Liver_Disease',
+       'Diabetes_without_Chronic_Complication',
+       'Diabetes_with_Chronic_Complication', 'Hemiplegia_or_Paraplegia',
+       'Renal_Disease', 'Any_Malignancy', 'Moderate_or_Severe_Liver_Disease',
+       'Metastatic_Solid_Tumor', 'AIDS_HIV']
+
+CLINICAL_FEATURES = ['age', 'Charlson_score', 'pre_pain_score', 'bmi']
+CLINICAL_WEIGHTS = {
+    'age': 0.3,
+    'Charlson_score': 0.3,
+    'pre_pain_score': 0.2,
+    'bmi': 0.2
+}
+
+
+def cosine_distance(X, baseline=0.1):
+    """
+    Calculate pairwise cosine distances between patients.
+    
+    Parameters:
+    - X: DataFrame or array containing patient data
+    
+    Returns:
+    - distances: A square matrix of pairwise cosine distances between patients
+    """
+    if hasattr(X, 'values'):
+        data = X.values
+    else:
+        data = X
+    
+    data = data + baseline
+    distances = squareform(pdist(data, metric='cosine'))
+    
+    return distances
+
+
+def get_feature_subset(X, feature_set='all'):
+    """
+    Select a subset of features from the dataset based on the specified feature set.
+    
+    Parameters:
+    - X: DataFrame containing patient data
+    - feature_set: String indicating which feature set to use:
+                  'all': All features except patient ID
+                  'clinical': Only clinical features (age, Charlson_score, pre_pain_score, bmi)
+                  'comorbidity': Only comorbidity features
+    
+    Returns:
+    - X_subset: DataFrame containing only the selected features
+    """
+    if feature_set == 'all':
+        return X.drop(['pat_deid'], axis=1) if 'pat_deid' in X.columns else X
+    
+    elif feature_set == 'select_clinical':
+        return X[CLINICAL_FEATURES]
+    
+    elif feature_set == 'comorbidity':
+        return X[COMORBIDITY_FEATURES]
+    
+    elif feature_set == 'all_clinical':
+        return X[IF_FEATURES]
+    
+    else:
+        raise ValueError(f"Unknown feature set: {feature_set}. Valid options are 'all', 'all_clinical', 'select_clinical',  or 'comorbidity'.")
+
+
+def calculate_distance_based_fairness(X_test, predictions, distance_function=None, feature_set='all', distance_threshold=0.1, percentile=None):
+    """
+    Measure if similar patients get similar predictions
+    
+    Parameters:
+    - X_test: feature matrix of test data
+    - predictions: model predictions (probabilities or binary)
+    - distance_function: function to calculate distances between patients
+                        If None, will use comorbidity_distance by default
+    - distance_threshold: fixed threshold to consider patients as similar (default: 0.1)
+    - percentile: if provided, use this percentile of distances as threshold instead of fixed value
+                 (e.g., 5 means use the 5th percentile of all distances)
+    
+    Returns:
+    - avg_diff: average prediction difference between similar patients
+    - num_similar_pairs: number of similar pairs found
+    - threshold_used: the actual threshold used (either fixed or percentile-based)
+    """
+    X_subset = get_feature_subset(X_test, feature_set)
+
+    if distance_function is None:
+        distances = cosine_distance(X_subset)
+    else:
+        distances = distance_function(X_subset)
+    
+    if percentile is not None:
+        flat_distances = distances[~np.eye(distances.shape[0], dtype=bool)]
+        threshold_used = np.percentile(flat_distances, percentile)
+        print(f"Using {percentile}th percentile as threshold: {threshold_used:.4f}")
+    else:
+        threshold_used = distance_threshold
+        print(f"Using fixed threshold: {threshold_used:.4f}")
+    
+    similar_pairs = np.where(distances < threshold_used)
+    
+    not_same = similar_pairs[0] != similar_pairs[1]
+    similar_pairs = (similar_pairs[0][not_same], similar_pairs[1][not_same])
+    
+    prediction_differences = abs(predictions[similar_pairs[0]] - predictions[similar_pairs[1]])
+    
+    num_similar_pairs = len(prediction_differences)
+    if num_similar_pairs > 0:
+        avg_diff = np.mean(prediction_differences)
+        print(f"Found {num_similar_pairs} similar pairs")
+        n_patients = len(X_test)
+        avg_pairs_per_patient = num_similar_pairs / n_patients if n_patients > 0 else 0
+        print(f"Average number of similar pairs per patient: {avg_pairs_per_patient:.2f}")    
+        print(f"Average prediction difference: {avg_diff:.4f}")
+        return avg_diff, num_similar_pairs, threshold_used
+    else:
+        print("No similar pairs found. Try increasing the threshold or percentile.")
+        return None, 0, threshold_used
+    
+
+def analyze_individual_fairness_by_group(
+    X_test, 
+    y_pred_proba, 
+    group_column, 
+    feature_set='select_clinical',
+    distance_function=cosine_distance,
+    distance_threshold=0.05,
+    max_samples=50,
+    attribute_mappings=None,
+    process_specific_group=None
+):
+    """
+    Analyze individual fairness by demographic group.
+    
+    Parameters:
+    -----------
+    X_test : pandas.DataFrame
+        Test data with features
+    y_pred_proba : numpy.ndarray
+        Predicted probabilities from the model
+    group_column : str
+        Column name for the demographic group to analyze
+    feature_set : str, default='select_clinical'
+        Feature set to use for distance calculation
+    distance_function : function, default=cosine_distance
+        Function to calculate distances between patients
+    distance_threshold : float, default=0.05
+        Threshold for considering patients similar
+    max_samples : int, default=50
+        Maximum number of samples to use from each group
+    attribute_mappings : dict, default=None
+        Mapping from numeric codes to group labels
+        
+    Returns:
+    --------
+    pandas.DataFrame
+        DataFrame with fairness metrics by group
+    dict
+        Raw results dictionary with detailed statistics
+    """
+    X_test_mapped = X_test.copy()
+    if attribute_mappings and group_column in attribute_mappings:
+        X_test_mapped[group_column] = X_test_mapped[group_column].map(attribute_mappings[group_column])
+    
+    X_subset = get_feature_subset(X_test_mapped, feature_set)
+    calculated_distance = distance_function(X_subset)
+    df_index = X_test_mapped.index.tolist()
+    pairwise_distance = pd.DataFrame(
+        data=calculated_distance,
+        index=df_index,
+        columns=df_index
+    )
+    np.fill_diagonal(pairwise_distance.values, np.nan)
+    
+    result_dict = {}
+
+    def process_patient_group(patient_group):
+        print(f"Processing patient group: {patient_group}")
+        reference_mask = X_test_mapped[group_column] == patient_group
+
+        reference_patients = X_test[reference_mask]
+        reference_size = len(reference_patients)
+
+        print(f"Found {reference_size} patients in reference group '{patient_group}'")
+        if reference_size > max_samples:
+            reference_indices = np.random.choice(reference_size, max_samples, replace=False)
+            reference_patients = reference_patients.iloc[reference_indices]
+            print(f"Randomly sampled {max_samples} patients for analysis")
+
+        reference_patient_indices = reference_patients.index.tolist()
+        distance_subset = pairwise_distance.loc[reference_patient_indices, :]
+        distance_subset_filtered = distance_subset.copy()
+        mask = distance_subset_filtered < distance_threshold
+        distance_subset_filtered = distance_subset_filtered.where(mask)
+
+        distance_df = distance_subset_filtered.transpose().stack().reset_index()
+        distance_df.columns = ['reference_idx', 'patient_idx', 'distance']
+        distance_df = distance_df.dropna(subset=['distance'])
+        print(f"Distance dataframe shape: {distance_df.shape}")
+        
+        distance_df['reference_group'] = X_test_mapped[group_column].loc[distance_df.reference_idx].reset_index(drop=True)
+        y_proba_df = pd.DataFrame(y_pred_proba, index=X_test.index, columns=['y_pred_proba'])
+        distance_df['patient_proba'] = y_proba_df.loc[distance_df.patient_idx].reset_index(drop=True)
+        distance_df['reference_proba'] = y_proba_df.loc[distance_df.reference_idx].reset_index(drop=True)
+        distance_df['proba_diff'] = np.abs(distance_df['patient_proba'] - distance_df['reference_proba'])
+        
+        return distance_df.groupby('reference_group')['proba_diff'].describe()
+    
+    if process_specific_group is None:
+        for patient_group in X_test_mapped[group_column].unique():
+            result_dict[patient_group] = process_patient_group(patient_group)
+    else:
+        result_dict[process_specific_group] = process_patient_group(process_specific_group)
+
+    all_results = []
+    for group, group_data in result_dict.items():
+        for reference_group, stats in group_data.iterrows():
+            row = {
+                'group': group,
+                'reference_group': reference_group,
+                'count': stats['count'],
+                'mean_proba_diff': stats['mean'],
+                'std_proba_diff': stats['std'],
+                'min_proba_diff': stats['min'],
+                '25%_proba_diff': stats['25%'],
+                'average_proba_diff': stats['50%'],
+                '75%_proba_diff': stats['75%'],
+                'max_proba_diff': stats['max']
+            }
+            all_results.append(row)
+
+    result_df = pd.DataFrame(all_results)
+    
+    return result_df
+
+
+def filter_fairness_results(result_df, exclude_groups=None, group_column='group', reference_column='reference_group'):
+    """
+    Filter fairness results to exclude specified groups.
+    
+    Parameters:
+    -----------
+    result_df : pandas.DataFrame
+        DataFrame containing fairness results
+    exclude_groups : list or None
+        List of group values to exclude from both group and reference_group columns
+    group_column : str
+        Name of the column containing group values
+    reference_column : str
+        Name of the column containing reference group values
+    
+    Returns:
+    --------
+    pandas.DataFrame
+        Filtered DataFrame with excluded groups removed
+    """
+    if exclude_groups is None:
+        return result_df
+    
+    filtered_df = result_df.copy()
+    
+    for group in exclude_groups:
+        filtered_df = filtered_df[
+            (filtered_df[group_column] != group) & 
+            (filtered_df[reference_column] != group)
+        ]
+    
+    print(f"Filtered DataFrame shape: {filtered_df.shape}")
+    print(f"Removed {result_df.shape[0] - filtered_df.shape[0]} rows with excluded groups: {exclude_groups}")
+    
+    return filtered_df
+
+
+def plot_multiple_group_comparison_proba_diff(result_dfs, sensitive_attributes, title=None, figsize=(18, 10), 
+                                             low_threshold=0.025, medium_threshold=0.05, 
+                                             high_threshold=0.1, save_path=None):
+    """
+    Create a dot plot showing average probability differences for multiple groups.
+    
+    Parameters:
+    -----------
+    result_dfs : list of pandas.DataFrame
+        List of DataFrames containing the fairness results, each with columns:
+        'group', 'reference_group', 'mean_proba_diff', 'count'
+        Each DataFrame should have only one unique value in the 'group' column.
+    title : str, optional
+        Title for the plot. If None, a default title is used.
+    figsize : tuple, optional
+        Figure size as (width, height) in inches.
+    low_threshold : float, optional
+        Threshold for low disparity (default: 0.025)
+    medium_threshold : float, optional
+        Threshold for medium disparity (default: 0.05)
+    high_threshold : float, optional
+        Threshold for high disparity (default: 0.1)
+    save_path : str, optional
+        If provided, the plot will be saved to this path.
+        
+    Returns:
+    --------
+    matplotlib.figure.Figure
+        The created figure object.
+    """
+    plt.figure(figsize=figsize)
+
+    group_names = [df['group'].iloc[0] for df in result_dfs]
+    group_positions = np.arange(len(result_dfs)) * 2
+
+    all_reference_groups = set()
+    for df in result_dfs:
+        all_reference_groups.update(df['reference_group'].unique())
+    all_reference_groups = sorted(list(all_reference_groups))
+    
+    colors = plt.cm.viridis(np.linspace(0, 1, len(all_reference_groups)))
+    color_map = {ref_group: color for ref_group, color in zip(all_reference_groups, colors)}
+
+    for i in range(1, len(result_dfs)):
+        x_pos = (group_positions[i-1] + group_positions[i]) / 2
+        plt.axvline(x=x_pos, color='lightgray', linestyle='-', alpha=0.5, zorder=0)
+
+    for i, (result_df, group_name) in enumerate(zip(result_dfs, group_names)):
+        ref_groups = result_df['reference_group'].values
+        averages = result_df['mean_proba_diff'].values
+        counts = result_df['count'].values
+        
+        same_group_idx = np.where(ref_groups == group_name)[0]
+        
+        for j, (ref_group, average, count) in enumerate(zip(ref_groups, averages, counts)):
+            is_same_group = ref_group == group_name
+            
+            plt.scatter(
+                group_positions[i], 
+                average,
+                s=1200 if is_same_group else 400,
+                color=color_map[ref_group],
+                edgecolor='black' if is_same_group else None,
+                linewidth=3 if is_same_group else 0,
+                alpha=0.8,
+                zorder=10 if is_same_group else 5
+            )
+            
+            plt.text(
+                group_positions[i] + 0.2, 
+                average,
+                f"{ref_group}",
+                va='center',
+                fontsize=14,
+                weight='bold' if is_same_group else 'normal',
+                zorder=15
+            )
+
+    for i, (result_df, attr_name) in enumerate(zip(result_dfs, sensitive_attributes)):
+        averages = result_df['mean_proba_diff'].values
+        ref_groups = result_df['reference_group'].values
+        
+        min_idx = np.argmin(averages)
+        max_idx = np.argmax(averages)
+        min_val = averages[min_idx]
+        max_val = averages[max_idx]
+        min_group = ref_groups[min_idx]
+        max_group = ref_groups[max_idx]
+        
+        diff = max_val - min_val
+        line_width = 1 + 25 * (diff / 0.15)
+        line_alpha = min(0.8, max(0.3, diff / 0.15))
+        
+        font_size = 10 + 6 * (diff / 0.15)
+        font_size = min(16, max(10, font_size))
+        
+        plt.plot([group_positions[i], group_positions[i]], [min_val, max_val], 
+                 color='darkred', linewidth=line_width, alpha=line_alpha, zorder=1)
+        
+        plt.text(group_positions[i] - 0.1, (min_val + max_val) / 2, 
+                f"Δ = {diff:.3f}", ha='right', va='center', 
+                fontsize=font_size, color='darkred', fontweight='bold')
+    
+    legend_elements = []
+    
+    legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                          markersize=37, markeredgecolor='black', markeredgewidth=1.5,
+                          label='Same Group (Reference)'))
+    
+    legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                          markersize=21, label='Different Group (Comparison)'))
+    
+    legend = plt.legend(
+        handles=legend_elements, 
+        loc='upper right', 
+        frameon=True,
+        framealpha=0.9,
+        edgecolor='gray',
+        borderpad=1.2,
+        labelspacing=1.5,
+        handletextpad=1.0,
+        handlelength=3.0,
+        fontsize=16
+    )
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
+
+    plt.xlabel('Sensitive Attribute Group', fontsize=16)
+    plt.ylabel('Mean Prediction Probability Difference', fontsize=16)
+    
+    if title is None:
+        title = 'Mean Prediction Probability Differences Across Patient Groups'
+    plt.title(title, fontsize=21)
+    
+    plt.xticks(group_positions, sensitive_attributes, fontsize=14)
+    plt.grid(axis='y', linestyle='--', alpha=0.3)
+
+    all_averages = []
+    for df in result_dfs:
+        all_averages.extend(df['mean_proba_diff'].values)
+    
+    y_min = min(all_averages) - 0.01
+    y_max = max(all_averages) + 0.01
+    plt.ylim(y_min, y_max)
+
+    plt.xlim(min(group_positions) - 1, max(group_positions) + 2)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, format="pdf", bbox_inches="tight")
+    
+    plt.show()
+    
+    return plt.gcf()
+
+
+def plot_fairness_heatmap(
+    result_df, 
+    title, 
+    figsize=(10, 8), 
+    cmap='YlOrRd', 
+    annot=True, 
+    vmin=None, 
+    vmax=None, 
+    savefig=False, 
+    savepath=None
+):
+    """
+    Create a heatmap of mean probability differences between groups, sorted by total interaction count.
+    
+    Parameters:
+    -----------
+    result_df : pandas.DataFrame
+        DataFrame containing fairness analysis results
+    title : str
+        Title for the heatmap
+    figsize : tuple, default=(10, 8)
+        Figure size (width, height)
+    cmap : str, default='YlOrRd'
+        Color map for the heatmap
+    annot : bool, default=True
+        Whether to annotate cells with numerical value
+    vmin, vmax : float, optional
+        Minimum and maximum values for color scaling. If None, uses data min/max.
+    savefig : bool, default=False
+        Whether to save the figure to a file
+    savepath : str, optional
+        Path to save the figure. If None and savefig is True, uses 'fairness_heatmap.png'
+    """
+    group_counts = pd.concat([
+        result_df.groupby('group')['count'].sum(),
+        result_df.groupby('reference_group')['count'].sum()
+    ]).groupby(level=0).sum().to_dict()
+    
+    sorted_groups = sorted(group_counts.keys(), key=lambda x: group_counts[x], reverse=True)
+    
+    heatmap_data = result_df.pivot(
+        index='reference_group',
+        columns='group',
+        values='mean_proba_diff'
+    )
+    
+    heatmap_data = heatmap_data.reindex(
+        index=sorted_groups[::-1], 
+        columns=sorted_groups,
+    )
+    
+    n = heatmap_data.shape[0]
+    mask = np.tril(np.ones((n, n), dtype=bool), k=0)
+    mask = np.flipud(mask)
+    mask = ~mask
+    
+    plt.figure(figsize=figsize)
+    sns.heatmap(
+        heatmap_data,
+        annot=annot,
+        fmt='.3f',
+        cmap=cmap,
+        center=None,
+        square=True,
+        vmin=vmin,
+        vmax=vmax,
+        cbar_kws={'label': 'Mean Probability Difference'},
+        mask=mask
+    )
+    
+    plt.title(title, pad=20)
+    plt.xlabel('Group')
+    plt.ylabel('Reference Group')
+    plt.tight_layout()
+    
+    if savefig:
+        if savepath is None:
+            savepath = "fairness_heatmap.pdf"
+        plt.savefig(savepath, bbox_inches='tight', format='pdf', dpi=300)
+        print(f"Figure saved to {savepath}")
+    
+    plt.show()
+
+def plot_fairness_comparison(
+    result_df1, 
+    result_df2, 
+    titles=None, 
+    figsize=(20, 8), 
+    savefig=False, 
+    savepath=None
+):
+    """
+    Create two heatmaps side by side with shared color scale.
+    
+    Parameters:
+    -----------
+    result_df1, result_df2 : DataFrame
+        DataFrames containing fairness analysis results
+    titles : tuple of str, optional
+        Titles for the two plots
+    figsize : tuple, default=(20, 8)
+        Figure size (width, height)
+    savefig : bool, default=False
+        Whether to save the figure to a file
+    savepath : str, optional
+        Path to save the figure. If None and savefig is True, uses 'fairness_comparison.png'
+    """
+    vmin = min(
+        result_df1['mean_proba_diff'].min(),
+        result_df2['mean_proba_diff'].min()
+    )
+    vmax = max(
+        result_df1['mean_proba_diff'].max(),
+        result_df2['mean_proba_diff'].max()
+    )
+    
+    if titles is None:
+        titles = ("Individual Fairness: Race/Ethnicity Group Comparisons",
+                 "Individual Fairness: Race/Ethnicity Group Comparisons")
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    
+    group_counts1 = pd.concat([
+        result_df1.groupby('group')['count'].sum(),
+        result_df1.groupby('reference_group')['count'].sum()
+    ]).groupby(level=0).sum().to_dict()
+    sorted_groups1 = sorted(group_counts1.keys(), key=lambda x: group_counts1[x], reverse=True)
+    heatmap_data1 = result_df1.pivot(
+        index='reference_group',
+        columns='group',
+        values='mean_proba_diff'
+    ).reindex(index=sorted_groups1[::-1], columns=sorted_groups1)
+    
+    group_counts2 = pd.concat([
+        result_df2.groupby('group')['count'].sum(),
+        result_df2.groupby('reference_group')['count'].sum()
+    ]).groupby(level=0).sum().to_dict()
+    sorted_groups2 = sorted(group_counts2.keys(), key=lambda x: group_counts2[x], reverse=True)
+    heatmap_data2 = result_df2.pivot(
+        index='reference_group',
+        columns='group',
+        values='mean_proba_diff'
+    ).reindex(index=sorted_groups2[::-1], columns=sorted_groups2)
+    
+    n1 = heatmap_data1.shape[0]
+    mask1 = np.tril(np.ones((n1, n1), dtype=bool), k=0)
+    mask1 = np.flipud(mask1)
+    mask1 = ~mask1
+    sns.heatmap(
+        heatmap_data1,
+        annot=True,
+        fmt='.3f',
+        cmap='YlOrRd',
+        square=True,
+        vmin=vmin,
+        vmax=vmax,
+        ax=ax1,
+        cbar_kws={'label': 'Mean Probability Difference'},
+        mask=mask1
+    )
+    ax1.set_title(titles[0], pad=20)
+    ax1.set_xlabel('Group')
+    ax1.set_ylabel('Reference Group')
+    
+    n2 = heatmap_data2.shape[0]
+    mask2 = np.tril(np.ones((n2, n2), dtype=bool), k=0)
+    mask2 = np.flipud(mask2)
+    mask2 = ~mask2
+    sns.heatmap(
+        heatmap_data2,
+        annot=True,
+        fmt='.3f',
+        cmap='YlOrRd',
+        square=True,
+        vmin=vmin,
+        vmax=vmax,
+        ax=ax2,
+        cbar_kws={'label': 'Mean Probability Difference'},
+        mask=mask2
+    )
+    ax2.set_title(titles[1], pad=20)
+    ax2.set_xlabel('Group')
+    ax2.set_ylabel('Reference Group')
+    
+    plt.tight_layout()
+    
+    if savefig:
+        if savepath is None:
+            savepath = "fairness_comparison.png"
+        plt.savefig(savepath, bbox_inches='tight')
+        print(f"Figure saved to {savepath}")
+    
+    plt.show()
+
+
+def save_fairness_results(results, save_dir='results/individual', suffix=''):
+    os.makedirs(save_dir, exist_ok=True)
+    
+    date = datetime.now().strftime('%Y%m%d')
+    
+    filepath = os.path.join(save_dir, f'ind_results_{date}{suffix}.pkl')
+    with open(filepath, 'wb') as f:
+        pickle.dump(results, f)
+
+    print(f"Saved all fairness results to: {filepath}")
+    print(f"Number of DataFrames saved: {len(results)}")
+    return filepath
+
+def load_fairness_results(filepath):    
+    with open(filepath, 'rb') as f:
+        results = pickle.load(f)
+    
+    print(f"Loaded {len(results)} DataFrames from: {filepath}")
+    return results
