@@ -67,10 +67,9 @@ demographic_mappings = {
 
 ## Notebooks
 The Jupyter notebooks demonstrate how to perform fairness analysis:
-- `group_fairness.ipynb`: Perform group fairness analysis using demographic attributes
-- `05.0_ind_fairness.ipynb`: Perform individual fairness analysis
-- `05.1_ind_fairness_heatmap.ipynb`: Create heatmaps of individual fairness results
-- `05.2_ind_fairness_mppd.ipynb`: Additional individual fairness analysis
+- `group_fairness_demo.ipynb`: Perform group fairness analysis using demographic attributes
+- `individual_fairness_demo.ipynb`: Perform individual fairness analysis and create heatmaps of individual fairness results
+- `mppd_demo.ipynb`: Focused analysis of Mean Prediction Probability Difference (MPPD) metrics for detecting algorithmic bias 
 
 ## Source Code
 Core functionality is implemented in the `src/` directory:
