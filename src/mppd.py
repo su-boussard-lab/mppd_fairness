@@ -17,27 +17,6 @@ from .constants import (
 )
 
 
-def cosine_distance(X, baseline=0.1):
-    """
-    Calculate pairwise cosine distances between patients.
-    
-    Parameters:
-    - X: DataFrame or array containing patient data
-    
-    Returns:
-    - distances: A square matrix of pairwise cosine distances between patients
-    """
-    if hasattr(X, 'values'):
-        data = X.values
-    else:
-        data = X
-    
-    data = data + baseline
-    distances = squareform(pdist(data, metric='cosine'))
-    
-    return distances
-
-
 def plot_multiple_group_comparison_proba_diff(result_dfs, sensitive_attributes, title=None, figsize=(18, 10), 
                                              low_threshold=0.025, medium_threshold=0.05, 
                                              high_threshold=0.1, save_path=None):
